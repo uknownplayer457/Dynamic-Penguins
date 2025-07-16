@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Dynamic Penguins</title>
+   <link rel="icon" type="image/x-icon" href="icon.jpg">
+  <style>
+    body { margin: 0; background: #000; overflow: hidden; }
+    canvas {display: block; margin: 0 auto; background: url('town.jpg'); background-size:contain; background-repeat:no-repeat; }
+    #chat { 
+      position: absolute; 
+      bottom: 10px; 
+      left: 50%; 
+      transform: translateX(-50%); 
+      width: 300px; 
+      padding: 6px; 
+      font-size: 16px; 
+      border-radius: 4px;
+      border: none;
+      outline: none;
+    }
+    .logo{
+      width: 500px;
+    }
+    #log {
+  position: absolute;
+  top: 730px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 800px;
+  height: 140px;
+  background: #111;
+  color: #0f0;
+  font-family: monospace;
+  font-size: 14px;
+  padding: 10px;
+  overflow-y: auto;
+  border-top: 2px solid #333;
+}
+
+  </style>
+</head>
+<body>
+  <center><img class="logo" src="paper.png"></center>
+  <br>
+ <select id="roomSelect" style="position:absolute; top: 700px; left:545px; z-index: 5;">
+  <option value="" disabled selected>Switch location</option>
+  <option value="town">Town</option>
+  <option value="house">Home</option>
+</select>
+
+  <canvas id="game" width="870" height="630"></canvas>
+  <input id="chat" placeholder="Type and press enter" autocomplete="off" />
+
+  <div id="log"></div>
+
+  <audio id="bgmusic" src="" loop></audio>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const chat = document.getElementById("chat");
+
+    const bgmusic = document.getElementById("bgmusic");
+    let musicStarted = false;
+    
+    bgmusic.src = "town.mp3";
+
+    let username = prompt("Enter your username (leave empty to be 'Guest')") || "Guest";
+    let socket = new WebSocket("ws://localhost:3000");
+
+    let currentRoom = "town";
+
+    const penguinImg = new Image();
+    penguinImg.src = "spin_sheet.png";
+
+    const frameCount = 8;
+    const speed = 200;
+
+    let myId = null;
+    let players = {};
+
+    // local target position for penguin
+    let targetX = 400;
+    let targetY = 300;
+
+    // mouse coords
+    let mouseX = 0, mouseY = 0;
+    canvas.addEventListener("mousemove", e => {
+      const rect = canvas.getBoundingClientRect();
+      mouseX = e.clientX - rect.left;
+      mouseY = e.clientY - rect.top;
+    });
+
+    document.getElementById("roomSelect").addEventListener("change", (e) => {
+  currentRoom = e.target.value;
+  socket.send(JSON.stringify({ type: "room", room: currentRoom }));
+  document.querySelector("canvas").style.backgroundImage = `url('${currentRoom}.jpg')`;
+
+  bgmusic.pause();
+  bgmusic.src = `${currentRoom}.mp3`;
+  bgmusic.load();
+  bgmusic.volume = 0.5;
+  bgmusic.play().catch(err => console.warn("Music play blocked", err));
+
+  addLog(`You moved to "${currentRoom}"`);
+  });
+
+
+    function addLog(message) {
+  const log = document.getElementById("log");
+  const timestamp = new Date().toLocaleTimeString();
+  const entry = document.createElement("div");
+  entry.textContent = `[${timestamp}] ${message}`;
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight; // auto-scroll
+}
+
+    // when user clicks set target and send move to server
+    canvas.addEventListener("click", e => {
+
+      //let music start
+      if (!musicStarted) {
+      bgmusic.volume = 0.5;
+      bgmusic.play().catch(err => console.warn("Music play blocked", err));
+      musicStarted = true;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      targetX = e.clientX - rect.left;
+      targetY = e.clientY - rect.top;
+
+      if (myId) {
+        socket.send(JSON.stringify({ type: "move", x: targetX, y: targetY }));
+      }
+    });
+
+    // send chat message
+    chat.addEventListener("keydown", e => {
+      if (e.key === "Enter" && chat.value.trim() !== "") {
+        socket.send(JSON.stringify({ type: "chat", message: chat.value.trim() }));
+        chat.value = "";
+      }
+    });
+
+    // handle incoming messages
+    socket.onmessage = e => {
+      const data = JSON.parse(e.data);
+
+      if (data.type === "init") {
+        myId = data.id;
+        // send join info with username
+        socket.send(JSON.stringify({ type: "join", username, room: currentRoom }));
+        addLog(`You joined as "${username}"`);
+      } else if (data.type === "state") {
+        // update player info
+        // initialize display position to server position for new players
+        for (let id in data.players) {
+          const p = data.players[id];
+          if (!players[id]) {
+            players[id] = {
+              username: p.username,
+              chat: p.chat,
+              serverX: p.x,
+              serverY: p.y,
+              displayX: p.x,
+              displayY: p.y
+            };
+            if (id !== myId) {
+              addLog(`"${players[id].username}" joined`);
+            }
+          } else {
+            players[id].username = p.username;
+            players[id].chat = p.chat;
+            players[id].serverX = p.x;
+            players[id].serverY = p.y;
+          }
+        }
+        // remove players
+        for (let id in players) {
+          if (!data.players[id]) {
+            addLog(`"${players[id].username}" left`);
+            delete players[id];
+          }
+        }
+      }
+    };
+
+    // sprite direction index based on movement vector
+    function getDirectionIndex(fromX, fromY, toX, toY) {
+      const angle = Math.atan2(toY - fromY, toX - fromX);
+      let degrees = angle * (180 / Math.PI);
+      degrees = (degrees + 360 + 90) % 360; // Align to sprite sheet orientation
+      return Math.round(degrees / 45) % frameCount;
+    }
+
+    // update player positions
+    function update(delta) {
+      for (let id in players) {
+        let p = players[id];
+
+        if (id === myId) {
+          // move our own player locally
+          let dx = targetX - p.displayX;
+          let dy = targetY - p.displayY;
+          let dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist > 1) {
+            let moveDist = speed * delta;
+            if (moveDist < dist) {
+              p.displayX += dx / dist * moveDist;
+              p.displayY += dy / dist * moveDist;
+            } else {
+              p.displayX = targetX;
+              p.displayY = targetY;
+            }
+          }
+        } else {
+          // move other players
+          let dx = p.serverX - p.displayX;
+          let dy = p.serverY - p.displayY;
+          let dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist > 1) {
+            let moveDist = speed * delta;
+            if (moveDist < dist) {
+            p.displayX += dx / dist * moveDist;
+            p.displayY += dy / dist * moveDist;
+          } else {
+            p.displayX = p.serverX;
+            p.displayY = p.serverY;
+          }
+        }
+        }
+      }
+    }
+
+    // draw all players on canvas
+    const frameWidth = 100;
+const frameHeight = 100;
+const framesPerRow = 4;
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  for (let id in players) {
+    const p = players[id];
+
+    let direction;
+    if (id === myId) {
+      direction = getDirectionIndex(p.displayX, -p.displayY, targetX, -targetY);
+    } else {
+     direction = getDirectionIndex(p.displayX, -p.displayY, p.serverX, -p.serverY);
+    }
+
+    //column and row on sprite sheet
+    const col = direction % framesPerRow;
+    const row = Math.floor(direction / framesPerRow);
+
+    ctx.drawImage(
+      penguinImg,
+      col * frameWidth, row * frameHeight,
+      frameWidth, frameHeight,
+      p.displayX - frameWidth / 2,
+      p.displayY - frameHeight / 2,
+      frameWidth, frameHeight
+    );
+
+    ctx.fillStyle = "black";
+    ctx.font = "12px Arial";
+    ctx.fillText(p.username, p.displayX - 20, p.displayY - frameHeight / 2 + 100);
+
+    if (p.chat) {
+      ctx.fillStyle = "#2b9cff";
+      ctx.font = "15px Arial";
+      ctx.fillText("- " + p.chat, p.displayX - 20, p.displayY - frameHeight / 2 - 5);
+    }
+  }
+}
+
+
+    let lastTime = performance.now();
+
+    function loop() {
+      const now = performance.now();
+      const delta = (now - lastTime) / 1000;
+      lastTime = now;
+
+      update(delta);
+      draw();
+
+      requestAnimationFrame(loop);
+    }
+
+    penguinImg.onload = () => {
+      loop();
+    };
+
+    socket.onerror = (e) => {
+      console.error("WebSocket error:", e);
+    };
+
+    socket.onclose = () => {
+      console.log("WebSocket connection closed.");
+    };
+
+
+  </script>
+</body>
+</html>
