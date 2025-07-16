@@ -78,4 +78,4 @@ wss.clients.forEach((client) => {
 
 }, 50);
 
-console.log("WebSocket server running on ws://localhost:3000");
+console.log("Dynamic Penguins server is working on port 3000.");
